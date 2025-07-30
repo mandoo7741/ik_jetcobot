@@ -5,8 +5,8 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from flask import Flask, Response, redirect
-import apriltag
-
+from pupil_apriltags import Detector
+import numpy as np
 
 app = Flask(__name__)
 frame_lock = threading.Lock()
@@ -16,49 +16,101 @@ class AprilTagNode(Node):
     def __init__(self):
         super().__init__('april_tag_node')
 
+        self.detector = Detector(
+            families="tagStandard41h12",
+            nthreads=4,
+            quad_decimate=1.0,
+            quad_sigma=0.0,
+            refine_edges=True,
+            decode_sharpening=0.25,
+            debug=False
+        )
+
         # 카메라 초기화
         self.cap = cv2.VideoCapture('/dev/jetcocam0')
-        self.detector = apriltag.Detector()
+        if not self.cap.isOpened():
+            self.get_logger().error("카메라를 열 수 없습니다. 경로를 확인하세요.")
+
+        # ROS2 Publisher
         self.publisher = self.create_publisher(PoseStamped, '/april_tag_pose', 10)
 
-        # Intrinsic 파라미터 (예시값)
-        self.fx = 978.5
-        self.fy = 981.7
-        self.cx = 293.1
-        self.cy = 163.1
-        self.tag_size = 0.028  # 28mm
+        # 실제 카메라 Intrinsic 파라미터
+        self.camera_matrix = np.array([
+            [978.548555, 0.0, 293.112691],
+            [0.0, 981.781244, 163.100487],
+            [0.0, 0.0, 1.0]
+        ])
+        self.dist_coeffs = np.array([-0.481485, 0.586547, -0.000026, 0.005891, 0.0])
+        self.tag_size = 0.028  # 28mm (meter)
 
+        # 주기적으로 프레임 처리
         self.timer = self.create_timer(0.05, self.process_frame)
 
     def process_frame(self):
         global latest_frame
         ret, frame = self.cap.read()
         if not ret:
+            self.get_logger().warn("Camera frame not received.")
             return
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         results = self.detector.detect(gray)
 
-        for r in results:
-            (cX, cY) = (int(r.center[0]), int(r.center[1]))
-            cv2.circle(frame, (cX, cY), 5, (0, 255, 0), -1)
-            cv2.putText(frame, f"ID: {r.tag_id}", (cX-20, cY-20), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        if len(detections) == 0:
+            return
+        
+        if len(detections) > 0:
+            for det in detections:
+                corners = np.array(det.corners, dtype=np.float32)
 
-            # 간단한 Z 추정
-            z = (self.fx * self.tag_size) / (r.corners[1][0] - r.corners[0][0])
-            pose = PoseStamped()
-            pose.header.stamp = self.get_clock().now().to_msg()
-            pose.header.frame_id = "camera_link"
-            pose.pose.position.x = (cX - self.cx) * z / self.fx
-            pose.pose.position.y = (cY - self.cy) * z / self.fy
-            pose.pose.position.z = z
-            pose.pose.orientation.w = 1.0
-            self.publisher.publish(pose)
+            # 실제 태그 3D 좌표 (단위: m)
+            obj_points = np.array([
+                [-self.tag_size/2, -self.tag_size/2, 0],
+                [ self.tag_size/2, -self.tag_size/2, 0],
+                [ self.tag_size/2,  self.tag_size/2, 0],
+                [-self.tag_size/2,  self.tag_size/2, 0]
+            ], dtype=np.float32)
 
+            # solvePnP로 pose 계산
+            success, rvec, tvec = cv2.solvePnP(
+                obj_points,
+                corners,
+                self.camera_matrix,
+                self.dist_coeffs,
+                flags=cv2.SOLVEPNP_ITERATIVE
+            )
+            if success:
+                pose_msg = PoseStamped()
+                pose_msg.header.stamp = self.get_clock().now().to_msg()
+                pose_msg.header.frame_id = "jetcocam"
+
+                # 위치
+                pose_msg.pose.position.x = tvec[0][0]
+                pose_msg.pose.position.y = tvec[1][0]
+                pose_msg.pose.position.z = tvec[2][0]
+
+                # 회전 (Rodrigues → Quaternion)
+                R, _ = cv2.Rodrigues(rvec)
+                qw = np.sqrt(1.0 + R[0,0] + R[1,1] + R[2,2]) / 2.0
+                qx = (R[2,1] - R[1,2]) / (4*qw)
+                qy = (R[0,2] - R[2,0]) / (4*qw)
+                qz = (R[1,0] - R[0,1]) / (4*qw)
+
+                pose_msg.pose.orientation.x = float(qx)
+                pose_msg.pose.orientation.y = float(qy)
+                pose_msg.pose.orientation.z = float(qz)
+                pose_msg.pose.orientation.w = float(qw)
+
+                self.publisher.publish(pose_msg)
+                self.get_logger().info(f"Published pose for tag ID {det.tag_id}")
+
+
+        # 최신 프레임을 Flask 스트리밍용으로 저장
         with frame_lock:
             latest_frame = frame.copy()
 
+
+# ---------------- Flask Streaming ---------------- #
 def generate_frames():
     global latest_frame
     while True:
@@ -81,6 +133,7 @@ def stream():
 def flask_thread():
     app.run(host='0.0.0.0', port=5000, debug=False, threaded=True, use_reloader=False)
 
+# ---------------- Main ---------------- #
 def main(args=None):
     rclpy.init(args=args)
     node = AprilTagNode()
