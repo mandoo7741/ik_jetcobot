@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>mycobot_pick_place</name>
+  <version>0.0.1</version>
+  <description>Pick and Place control package for MyCobot using AprilTag and PyMyCobot API</description>
+  <maintainer email="bjhee0430@gmail.com">bjh</maintainer>
+  <license>Apache License 2.0</license>
+
+  <!-- 빌드 타입 -->
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <!-- 런타임 의존성 -->
+  <depend>rclpy</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>pybycobot</depend>
+
+
+  <!-- 테스트 의존성 -->
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
